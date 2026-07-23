@@ -141,7 +141,7 @@ def has_answer_pattern(text):
     return False
 
 
-def has_valid_image_size(example): # for Qwen2-VL-2B's processor requirement
+def has_valid_image_size(example):  # for Qwen2-VL-2B's processor requirement
     # Assuming the image is in a format that can be checked for dimensions
     # You might need to adjust this depending on how the image is stored in your dataset
     try:

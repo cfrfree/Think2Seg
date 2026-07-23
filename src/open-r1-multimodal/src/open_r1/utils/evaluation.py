@@ -3,12 +3,10 @@ from typing import TYPE_CHECKING, Dict, Union
 
 from .hub import get_gpu_count_for_vllm, get_param_count_from_repo_id
 
-
 if TYPE_CHECKING:
     from trl import GRPOConfig, SFTConfig, ModelConfig
 
 import os
-
 
 # We need a special environment setup to launch vLLM from within Slurm training jobs.
 # - Reference code: https://github.com/huggingface/brrr/blob/c55ba3505686d690de24c7ace6487a5c1426c0fd/brrr/lighteval/one_job_runner.py#L105
@@ -24,7 +22,11 @@ VLLM_SLURM_PREFIX = [
 
 
 def register_lighteval_task(
-    configs: Dict[str, str], eval_suite: str, task_name: str, task_list: str, num_fewshot: int = 0
+    configs: Dict[str, str],
+    eval_suite: str,
+    task_name: str,
+    task_list: str,
+    num_fewshot: int = 0,
 ):
     """Registers a LightEval task configuration.
 
@@ -40,7 +42,9 @@ def register_lighteval_task(
         is_custom_task (bool, optional): Whether the task is a custom task. Defaults to False.
     """
     # Format task list in lighteval format
-    task_list = ",".join(f"{eval_suite}|{task}|{num_fewshot}|0" for task in task_list.split(","))
+    task_list = ",".join(
+        f"{eval_suite}|{task}|{num_fewshot}|0" for task in task_list.split(",")
+    )
     configs[task_name] = task_list
 
 
@@ -60,7 +64,9 @@ SUPPORTED_BENCHMARKS = get_lighteval_tasks()
 
 
 def run_lighteval_job(
-    benchmark: str, training_args: Union["SFTConfig", "GRPOConfig"], model_args: "ModelConfig"
+    benchmark: str,
+    training_args: Union["SFTConfig", "GRPOConfig"],
+    model_args: "ModelConfig",
 ) -> None:
     task_list = LIGHTEVAL_TASKS[benchmark]
     model_name = training_args.hub_model_id
@@ -90,7 +96,9 @@ def run_lighteval_job(
     subprocess.run(cmd, check=True)
 
 
-def run_benchmark_jobs(training_args: Union["SFTConfig", "GRPOConfig"], model_args: "ModelConfig") -> None:
+def run_benchmark_jobs(
+    training_args: Union["SFTConfig", "GRPOConfig"], model_args: "ModelConfig"
+) -> None:
     benchmarks = training_args.benchmarks
     if len(benchmarks) == 1 and benchmarks[0] == "all":
         benchmarks = get_lighteval_tasks()

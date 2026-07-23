@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 import os
 
+
 class CombinedRefSegDataset(Dataset):
     """
     A dataset class that combines multiple reference segmentation datasets.
@@ -47,11 +48,16 @@ class CombinedRefSegDataset(Dataset):
             tuple: (dataset_idx, local_idx) - The dataset index and the local index within that dataset
         """
         if idx < 0 or idx >= len(self):
-            raise IndexError(f"Index {idx} out of bounds for combined dataset of length {len(self)}")
+            raise IndexError(
+                f"Index {idx} out of bounds for combined dataset of length {len(self)}"
+            )
 
         # Find which dataset the index belongs to
         dataset_idx = 0
-        while dataset_idx < len(self.cumulative_lengths) - 1 and idx >= self.cumulative_lengths[dataset_idx + 1]:
+        while (
+            dataset_idx < len(self.cumulative_lengths) - 1
+            and idx >= self.cumulative_lengths[dataset_idx + 1]
+        ):
             dataset_idx += 1
 
         # Calculate the local index within the dataset
@@ -76,14 +82,17 @@ class CombinedRefSegDataset(Dataset):
             sample = self.datasets[dataset_idx][local_idx]
 
             # Add a dataset identifier for debugging/analysis
-            sample['dataset_idx'] = dataset_idx
+            sample["dataset_idx"] = dataset_idx
 
             return sample
         except Exception as e:
-            print(f"Error loading sample {local_idx} from dataset {dataset_idx}: {str(e)}")
+            print(
+                f"Error loading sample {local_idx} from dataset {dataset_idx}: {str(e)}"
+            )
             # Try a random index as fallback
             fallback_idx = random.randint(0, len(self) - 1)
             return self[fallback_idx]
+
 
 def create_combined_dataset(*datasets):
     """
