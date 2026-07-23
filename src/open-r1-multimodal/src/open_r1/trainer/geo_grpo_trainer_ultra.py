@@ -41,8 +41,16 @@ from transformers import (
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
 
-from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
-from trl.models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
+from trl.data_utils import (
+    apply_chat_template,
+    is_conversational,
+    maybe_apply_chat_template,
+)
+from trl.models import (
+    create_reference_model,
+    prepare_deepspeed,
+    unwrap_model_for_generation,
+)
 from trl.trainer.grpo_config import GRPOConfig
 from trl.trainer.utils import generate_model_card, get_comet_experiment_url
 from trl import GRPOTrainer
@@ -61,7 +69,18 @@ if is_peft_available():
 if is_wandb_available():
     import wandb
 
+
+def _get_swanlab_run_url():
+    try:
+        import swanlab
+        if swanlab.run is not None:
+            return swanlab.run.url
+    except Exception:
+        pass
+    return None
+
 from open_r1.vlm_modules.vlm_module import VLMBaseModule
+
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
@@ -104,7 +123,10 @@ class RepeatRandomSampler(Sampler):
 
     def __iter__(self):
         indexes = torch.randperm(self.num_samples, generator=self.generator).tolist()
-        indexes = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
+        indexes = [
+            indexes[i : i + self.batch_size]
+            for i in range(0, len(indexes), self.batch_size)
+        ]
         indexes = [chunk for chunk in indexes if len(chunk) == self.batch_size]
 
         for chunk in indexes:
@@ -209,11 +231,17 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         args: GRPOConfig = None,
         vlm_module: VLMBaseModule = None,
         train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
-        eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,
+        eval_dataset: Optional[
+            Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]
+        ] = None,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
-        reward_processing_classes: Optional[Union[PreTrainedTokenizerBase, list[PreTrainedTokenizerBase]]] = None,
+        reward_processing_classes: Optional[
+            Union[PreTrainedTokenizerBase, list[PreTrainedTokenizerBase]]
+        ] = None,
         callbacks: Optional[list[TrainerCallback]] = None,
-        optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
+        optimizers: tuple[
+            Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]
+        ] = (None, None),
         peft_config: Optional["PeftConfig"] = None,
         freeze_vision_modules: Optional[bool] = False,
         attn_implementation: str = "flash_attention_2",
@@ -225,7 +253,7 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             model_name = model if isinstance(model, str) else model.config._name_or_path
             model_name = model_name.split("/")[-1]
             args = GRPOConfig(f"{model_name}-GRPO")
-        
+
         self.vlm_module = vlm_module
 
         # Models
@@ -236,11 +264,17 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         model_init_kwargs["attn_implementation"] = attn_implementation
         if model_init_kwargs.get("torch_dtype") is None:
             model_init_kwargs["torch_dtype"] = torch_dtype
-        
-        assert isinstance(model, str), "model must be a string in the current implementation"
+
+        assert isinstance(
+            model, str
+        ), "model must be a string in the current implementation"
         model_id = model
         torch_dtype = model_init_kwargs.get("torch_dtype")
-        if isinstance(torch_dtype, torch.dtype) or torch_dtype == "auto" or torch_dtype is None:
+        if (
+            isinstance(torch_dtype, torch.dtype)
+            or torch_dtype == "auto"
+            or torch_dtype is None
+        ):
             pass  # torch_dtype is already a torch.dtype or "auto" or None
         elif isinstance(torch_dtype, str):  # it's a str, but not "auto"
             torch_dtype = getattr(torch, torch_dtype)
@@ -252,7 +286,7 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         model_init_kwargs["use_cache"] = (
             False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
         )
-            # Disable caching if gradient checkpointing is enabled (not supported)
+        # Disable caching if gradient checkpointing is enabled (not supported)
         model_init_kwargs["use_cache"] = (
             False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
         )
@@ -262,6 +296,7 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # LoRA
         self.vision_modules_keywords = self.vlm_module.get_vision_modules_keywords()
         if peft_config is not None:
+
             def find_all_linear_names(model, multimodal_keywords):
                 cls = torch.nn.Linear
                 lora_module_names = set()
@@ -275,6 +310,7 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                     if "embed_tokens" in m:
                         lora_module_names.remove(m)
                 return list(lora_module_names)
+
             target_modules = find_all_linear_names(model, self.vision_modules_keywords)
             peft_config.target_modules = target_modules
             model = get_peft_model(model, peft_config)
@@ -304,16 +340,23 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # Processing class
         if processing_class is None:
             processing_cls = self.vlm_module.get_processing_class()
-            processing_class = processing_cls.from_pretrained(model_id, trust_remote_code=model_init_kwargs.get("trust_remote_code", None))
+            processing_class = processing_cls.from_pretrained(
+                model_id,
+                trust_remote_code=model_init_kwargs.get("trust_remote_code", None),
+            )
             for processing_keyword in self.vlm_module.get_custom_processing_keywords():
                 if processing_keyword in kwargs:
-                    setattr(processing_class, processing_keyword, kwargs[processing_keyword])
-            if getattr(processing_class, "tokenizer",  None) is not None:
+                    setattr(
+                        processing_class, processing_keyword, kwargs[processing_keyword]
+                    )
+            if getattr(processing_class, "tokenizer", None) is not None:
                 pad_token_id = processing_class.tokenizer.pad_token_id
                 processing_class.pad_token_id = pad_token_id
                 processing_class.eos_token_id = processing_class.tokenizer.eos_token_id
             else:
-                assert isinstance(processing_class, PreTrainedTokenizerBase), "processing_class must be an instance of PreTrainedTokenizerBase if it has no tokenizer attribute"
+                assert isinstance(
+                    processing_class, PreTrainedTokenizerBase
+                ), "processing_class must be an instance of PreTrainedTokenizerBase if it has no tokenizer attribute"
                 pad_token_id = processing_class.pad_token_id
 
         self.vlm_module.post_model_init(model, processing_class)
@@ -336,14 +379,22 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             reward_processing_classes = [reward_processing_classes]
         else:
             if len(reward_processing_classes) != len(reward_funcs):
-                raise ValueError("The number of reward processing classes must match the number of reward functions.")
+                raise ValueError(
+                    "The number of reward processing classes must match the number of reward functions."
+                )
 
-        for i, (reward_processing_class, reward_func) in enumerate(zip(reward_processing_classes, reward_funcs)):
+        for i, (reward_processing_class, reward_func) in enumerate(
+            zip(reward_processing_classes, reward_funcs)
+        ):
             if isinstance(reward_func, PreTrainedModel):
                 if reward_processing_class is None:
-                    reward_processing_class = AutoTokenizer.from_pretrained(reward_func.config._name_or_path)
+                    reward_processing_class = AutoTokenizer.from_pretrained(
+                        reward_func.config._name_or_path
+                    )
                 if reward_processing_class.pad_token_id is None:
-                    reward_processing_class.pad_token = reward_processing_class.eos_token
+                    reward_processing_class.pad_token = (
+                        reward_processing_class.eos_token
+                    )
                 # The reward model computes the reward for the latest non-padded token in the input sequence.
                 # So it's important to set the pad token ID to the padding token ID of the processing class.
                 reward_func.config.pad_token_id = reward_processing_class.pad_token_id
@@ -358,22 +409,30 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         self.max_prompt_length = args.max_prompt_length
         self.max_prompt_length = None
         if args.max_prompt_length is not None:
-            warnings.warn("Setting max_prompt_length is currently not supported, it has been set to None")
+            warnings.warn(
+                "Setting max_prompt_length is currently not supported, it has been set to None"
+            )
 
-        self.max_completion_length = args.max_completion_length  # = |o_i| in the GRPO paper
+        self.max_completion_length = (
+            args.max_completion_length
+        )  # = |o_i| in the GRPO paper
         self.num_generations = args.num_generations  # = G in the GRPO paper
         self.generation_config = GenerationConfig(
             max_new_tokens=self.max_completion_length,
-            do_sample=True,  
+            do_sample=True,
             temperature=1,
             pad_token_id=pad_token_id,
         )
-        if hasattr(self.vlm_module, "get_eos_token_id"): # For InternVL
-            self.generation_config.eos_token_id = self.vlm_module.get_eos_token_id(processing_class)
+        if hasattr(self.vlm_module, "get_eos_token_id"):  # For InternVL
+            self.generation_config.eos_token_id = self.vlm_module.get_eos_token_id(
+                processing_class
+            )
             print(222, self.vlm_module.get_eos_token_id(processing_class))
         self.beta = args.beta
         self.epsilon_low = args.epsilon
-        self.epsilon_high = args.epsilon_high if args.epsilon_high is not None else args.epsilon
+        self.epsilon_high = (
+            args.epsilon_high if args.epsilon_high is not None else args.epsilon
+        )
 
         # Multi-step
         self.num_iterations = args.num_iterations  # = 𝜇 in the GRPO paper
@@ -388,6 +447,8 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # "Could not estimate the number of tokens of the input, floating-point operations will not be computed." To
         # suppress this warning, we set the "estimate_tokens" key in the model's "warnings_issued" dictionary to True.
         # This acts as a flag to indicate that the warning has already been issued.
+        if not hasattr(model, 'warnings_issued'):
+            object.__setattr__(model, 'warnings_issued', {})
         model.warnings_issued["estimate_tokens"] = True
 
         # Initialize the metrics
@@ -407,7 +468,11 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # Check if the per_device_train/eval_batch_size * num processes can be divided by the number of generations
         num_processes = self.accelerator.num_processes
         global_batch_size = args.per_device_train_batch_size * num_processes
-        possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
+        possible_values = [
+            n_gen
+            for n_gen in range(1, global_batch_size + 1)
+            if (global_batch_size) % n_gen == 0
+        ]
         if self.num_generations not in possible_values:
             raise ValueError(
                 f"The global train batch size ({num_processes} x {args.per_device_train_batch_size}) must be evenly "
@@ -416,7 +481,11 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             )
         if self.args.eval_strategy != "no":
             global_batch_size = args.per_device_eval_batch_size * num_processes
-            possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
+            possible_values = [
+                n_gen
+                for n_gen in range(1, global_batch_size + 1)
+                if (global_batch_size) % n_gen == 0
+            ]
             if self.num_generations not in possible_values:
                 raise ValueError(
                     f"The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly "
@@ -436,15 +505,24 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         if self.ref_model is not None:
             if self.is_deepspeed_enabled:
-                self.ref_model = prepare_deepspeed(self.ref_model, self.accelerator)
+                # Reference model is frozen (eval only), skip DeepSpeed wrapping
+                self.ref_model = self.accelerator.prepare_model(
+                    self.ref_model, evaluation_mode=True
+                )
             else:
-                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+                self.ref_model = self.accelerator.prepare_model(
+                    self.ref_model, evaluation_mode=True
+                )
 
         for i, reward_func in enumerate(self.reward_funcs):
             if isinstance(reward_func, PreTrainedModel):
-                self.reward_funcs[i] = self.accelerator.prepare_model(reward_func, evaluation_mode=True)
+                self.reward_funcs[i] = self.accelerator.prepare_model(
+                    reward_func, evaluation_mode=True
+                )
 
-    def _enable_gradient_checkpointing(self, model: PreTrainedModel, args: GRPOConfig) -> PreTrainedModel:
+    def _enable_gradient_checkpointing(
+        self, model: PreTrainedModel, args: GRPOConfig
+    ) -> PreTrainedModel:
         """Enables gradient checkpointing for the model."""
         # Ensure use_cache is disabled
         model.config.use_cache = False
@@ -467,14 +545,15 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
         use_reentrant = (
-            "use_reentrant" not in gradient_checkpointing_kwargs or gradient_checkpointing_kwargs["use_reentrant"]
+            "use_reentrant" not in gradient_checkpointing_kwargs
+            or gradient_checkpointing_kwargs["use_reentrant"]
         )
 
         if use_reentrant:
             model.enable_input_require_grads()
 
         return model
-    
+
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
         # By default, this method sets `self._signature_columns` to the model's expected inputs.
@@ -483,20 +562,30 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         if self._signature_columns is None:
             self._signature_columns = ["prompt"]
 
-
     # Get the per-token log probabilities for the completions for the model and the reference model
-    def _get_per_token_logps(self, model, input_ids, attention_mask, **custom_multimodal_inputs):
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, **custom_multimodal_inputs).logits  # (B, L, V)
-        logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-        input_ids = input_ids[:, 1:]  # (B, L-1), exclude the first input ID since we don't have logits for it
+    def _get_per_token_logps(
+        self, model, input_ids, attention_mask, **custom_multimodal_inputs
+    ):
+        logits = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **custom_multimodal_inputs,
+        ).logits  # (B, L, V)
+        logits = logits[
+            :, :-1, :
+        ]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
+        input_ids = input_ids[
+            :, 1:
+        ]  # (B, L-1), exclude the first input ID since we don't have logits for it
         # Compute the log probabilities for the input tokens. Use a loop to reduce memory peak.
         per_token_logps = []
         for logits_row, input_ids_row in zip(logits, input_ids):
             log_probs = logits_row.log_softmax(dim=-1)
-            token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
+            token_log_prob = torch.gather(
+                log_probs, dim=1, index=input_ids_row.unsqueeze(1)
+            ).squeeze(1)
             per_token_logps.append(token_log_prob)
         return torch.stack(per_token_logps)
-
 
     def _prepare_inputs(self, inputs):
         # Simple pass-through, just like original
@@ -510,7 +599,9 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         else:
             return [ele]
 
-    def _generate_and_score_completions(self, inputs: dict[str, Union[torch.Tensor, Any]], model) -> dict[str, Union[torch.Tensor, Any]]:
+    def _generate_and_score_completions(
+        self, inputs: dict[str, Union[torch.Tensor, Any]], model
+    ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         prompts = [x["prompt"] for x in inputs]
         prompts_text = self.vlm_module.prepare_prompt(self.processing_class, inputs)
@@ -520,25 +611,27 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             if "image" in x:
                 imgs = self._get_key_from_inputs(x, "image")
             elif "image_path" in x and x["image_path"] is not None:
-                imgs = [PIL.Image.open(p) for p in self._get_key_from_inputs(x, "image_path")]
+                imgs = [
+                    PIL.Image.open(p)
+                    for p in self._get_key_from_inputs(x, "image_path")
+                ]
 
             for img in imgs:
                 try:
                     # Ensure minimum dimensions of 28 pixels
                     w, h = img.size
                     if w < 28 or h < 28:
-                    # Calculate new dimensions maintaining aspect ratio
+                        # Calculate new dimensions maintaining aspect ratio
                         if w < h:
                             new_w = 28
-                            new_h = int(h * (28/w))
+                            new_h = int(h * (28 / w))
                         else:
                             new_h = 28
-                            new_w = int(w * (28/h))
+                            new_w = int(w * (28 / h))
                     img = img.resize((new_w, new_h), PIL.Image.Resampling.LANCZOS)
                 except:
                     pass
                 images.append(img)
-                
 
         prompt_inputs = self.vlm_module.prepare_model_inputs(
             self.processing_class,
@@ -551,8 +644,10 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         )
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
 
-        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-
+        prompt_ids, prompt_mask = (
+            prompt_inputs["input_ids"],
+            prompt_inputs["attention_mask"],
+        )
 
         # max_prompt_length is not supported yet
         # if self.max_prompt_length is not None:
@@ -564,8 +659,12 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # Generate completions
         with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
             generate_returned_result = unwrapped_model.generate(
-                **{k: v for k, v in prompt_inputs.items() if k not in self.vlm_module.get_non_generate_params()}, 
-                generation_config=self.generation_config
+                **{
+                    k: v
+                    for k, v in prompt_inputs.items()
+                    if k not in self.vlm_module.get_non_generate_params()
+                },
+                generation_config=self.generation_config,
             )
             prompt_length = prompt_ids.size(1)
             if not self.vlm_module.is_embeds_input():
@@ -580,9 +679,13 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
-        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
+        eos_idx = torch.full(
+            (is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device
+        )
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
+        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(
+            is_eos.size(0), -1
+        )
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
         # Concatenate prompt_mask with completion_mask for logit computation
@@ -590,7 +693,19 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         # Get the multimodal inputs
         multimodal_keywords = self.vlm_module.get_custom_multimodal_keywords()
-        multimodal_inputs = {k: prompt_inputs[k] if k in prompt_inputs else None for k in multimodal_keywords}
+        multimodal_inputs = {
+            k: prompt_inputs[k] if k in prompt_inputs else None
+            for k in multimodal_keywords
+        }
+        # Pad mm_token_type_ids to match prompt_completion_ids length (Qwen3.5 RoPE requires alignment)
+        if multimodal_inputs.get('mm_token_type_ids') is not None:
+            mm_tt_ids = multimodal_inputs['mm_token_type_ids']
+            completion_len = completion_ids.size(1)
+            mm_tt_ids = torch.cat([
+                mm_tt_ids,
+                torch.zeros(mm_tt_ids.size(0), completion_len, dtype=mm_tt_ids.dtype, device=mm_tt_ids.device)
+            ], dim=1)
+            multimodal_inputs['mm_token_type_ids'] = mm_tt_ids
         with torch.no_grad():
             # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip its
             # computation here, and use per_token_logps.detach() instead.
@@ -598,7 +713,7 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                 old_per_token_logps = self._get_per_token_logps(
                     model, prompt_completion_ids, attention_mask, **multimodal_inputs
                 )
-                old_per_token_logps = old_per_token_logps[:, prompt_length - 1:]
+                old_per_token_logps = old_per_token_logps[:, prompt_length - 1 :]
             else:
                 old_per_token_logps = None
 
@@ -606,86 +721,135 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                 ref_per_token_logps = None
             elif self.ref_model is not None:
                 ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model, prompt_completion_ids, attention_mask, **multimodal_inputs
+                    self.ref_model,
+                    prompt_completion_ids,
+                    attention_mask,
+                    **multimodal_inputs,
                 )
             else:
                 with self.accelerator.unwrap_model(model).disable_adapter():
                     ref_per_token_logps = self._get_per_token_logps(
-                        model, prompt_completion_ids, attention_mask, **multimodal_inputs
+                        model,
+                        prompt_completion_ids,
+                        attention_mask,
+                        **multimodal_inputs,
                     )
         if self.beta != 0.0:
-            ref_per_token_logps = ref_per_token_logps[:, prompt_length - 1:]
+            ref_per_token_logps = ref_per_token_logps[:, prompt_length - 1 :]
 
         # Calculate and record the think completion length before decoding
         self._record_think_completion_length(completion_ids)
 
         # Decode the generated completions
-        completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+        completions = self.processing_class.batch_decode(
+            completion_ids, skip_special_tokens=True
+        )
         if is_conversational(inputs[0]):
-            completions = [[{"role": "assistant", "content": completion}] for completion in completions]
+            completions = [
+                [{"role": "assistant", "content": completion}]
+                for completion in completions
+            ]
 
         # Compute the rewards
         # No need to duplicate prompts as we're not generating multiple completions per prompt
 
-        rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
+        rewards_per_func = torch.zeros(
+            len(prompts), len(self.reward_funcs), device=device
+        )
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
             if isinstance(reward_func, PreTrainedModel):
                 if is_conversational(inputs[0]):
-                    messages = [{"messages": p + c} for p, c in zip(prompts, completions)]
-                    texts = [apply_chat_template(x, reward_processing_class)["text"] for x in messages]
+                    messages = [
+                        {"messages": p + c} for p, c in zip(prompts, completions)
+                    ]
+                    texts = [
+                        apply_chat_template(x, reward_processing_class)["text"]
+                        for x in messages
+                    ]
                 else:
                     texts = [p + c for p, c in zip(prompts, completions)]
                 reward_inputs = reward_processing_class(
-                    texts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
+                    texts,
+                    return_tensors="pt",
+                    padding=True,
+                    padding_side="right",
+                    add_special_tokens=False,
                 )
                 reward_inputs = super()._prepare_inputs(reward_inputs)
                 with torch.inference_mode():
-                    rewards_per_func[:, i] = reward_func(**reward_inputs).logits[:, 0]  # Shape (B*G,)
+                    rewards_per_func[:, i] = reward_func(**reward_inputs).logits[
+                        :, 0
+                    ]  # Shape (B*G,)
             else:
                 # Repeat all input columns (but "prompt" and "completion") to match the number of generations
-                reward_kwargs = {key: [] for key in inputs[0].keys() if key not in ["prompt", "completion"]}
+                reward_kwargs = {
+                    key: []
+                    for key in inputs[0].keys()
+                    if key not in ["prompt", "completion"]
+                }
                 for key in reward_kwargs:
                     for example in inputs:
                         # No need to duplicate prompts as we're not generating multiple completions per prompt
                         # reward_kwargs[key].extend([example[key]] * self.num_generations)
                         reward_kwargs[key].extend([example[key]])
                         # calculate the reward for each generation, **kwargs can get the need inputs, and others are pack into **kwargs
-                output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs) 
+                output_reward_func = reward_func(
+                    prompts=prompts, completions=completions, **reward_kwargs
+                )
                 if isinstance(output_reward_func, dict):
                     rewards_to_log = output_reward_func
-                    rewards_per_func[:, i] = torch.tensor(output_reward_func["final_reward"], dtype=torch.float32, device=device)
+                    rewards_per_func[:, i] = torch.tensor(
+                        output_reward_func["final_reward"],
+                        dtype=torch.float32,
+                        device=device,
+                    )
                     for key, value in output_reward_func.items():
-                        self._metrics[f"rewards/{key}"].append(sum(value)/len(value))   # 此时记录的话，没有gather其他rank的结果
+                        self._metrics[f"rewards/{key}"].append(
+                            sum(value) / len(value)
+                        )  # 此时记录的话，没有gather其他rank的结果
                 else:
-                    rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
+                    rewards_per_func[:, i] = torch.tensor(
+                        output_reward_func, dtype=torch.float32, device=device
+                    )
 
         # # Gather rewards across processes
         # rewards_per_func = self.accelerator.gather(rewards_per_func)
-        
+
         # # # Sum the rewards from all reward functions
         # # rewards = rewards_per_func.sum(dim=1)
 
         if os.getenv("DEBUG_MODE") == "true":
             local_rewards_per_func = rewards_per_func.clone()
-            self._log_training_details(prompts, completions, completion_ids, local_rewards_per_func, reward_kwargs["image_path"], rewards_to_log)
+            self._log_training_details(
+                prompts,
+                completions,
+                completion_ids,
+                local_rewards_per_func,
+                reward_kwargs["image_path"],
+                rewards_to_log,
+            )
 
         rewards_per_func = self.accelerator.gather(rewards_per_func)
 
         # Sum the rewards from all reward functions
         rewards = rewards_per_func.sum(dim=1)
-        
+
         # Compute grouped-wise rewards
         # Each group consists of num_generations completions for the same prompt
         mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
         std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
-        
+
         # Normalize the rewards to compute the advantages
-        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(
+            self.num_generations, dim=0
+        )
+        std_grouped_rewards = std_grouped_rewards.repeat_interleave(
+            self.num_generations, dim=0
+        )
         advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-        
+
         # Get only the local slice of advantages
         process_slice = slice(
             self.accelerator.process_index * len(prompts),
@@ -694,7 +858,12 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         advantages = advantages[process_slice]
 
         # Log the metrics
-        completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
+        completion_length = (
+            self.accelerator.gather_for_metrics(completion_mask.sum(1))
+            .float()
+            .mean()
+            .item()
+        )
         self._metrics["completion_length"].append(completion_length)
 
         reward_per_func = self.accelerator.gather_for_metrics(rewards_per_func).mean(0)
@@ -703,12 +872,17 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                 reward_func_name = reward_func.config._name_or_path.split("/")[-1]
             else:
                 reward_func_name = reward_func.__name__
-            self._metrics[f"rewards/{reward_func_name}"].append(reward_per_func[i].item())
+            self._metrics[f"rewards/{reward_func_name}"].append(
+                reward_per_func[i].item()
+            )
 
-        self._metrics["reward"].append(self.accelerator.gather_for_metrics(rewards).mean().item())
+        self._metrics["reward"].append(
+            self.accelerator.gather_for_metrics(rewards).mean().item()
+        )
 
-        self._metrics["reward_std"].append(self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item())
-        
+        self._metrics["reward_std"].append(
+            self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item()
+        )
 
         return {
             "prompt_ids": prompt_ids,
@@ -721,38 +895,53 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             "multimodal_inputs": multimodal_inputs,
         }
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def compute_loss(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
         # inputs from __getitem__ in the dataset
         # Check if we need to generate new completions or use buffered ones
         if self.state.global_step % self.num_iterations == 0:
             inputs = self._generate_and_score_completions(inputs, model)
-            self._buffered_inputs[self._step % self.args.gradient_accumulation_steps] = inputs
+            self._buffered_inputs[
+                self._step % self.args.gradient_accumulation_steps
+            ] = inputs
         else:
-            inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
+            inputs = self._buffered_inputs[
+                self._step % self.args.gradient_accumulation_steps
+            ]
         self._step += 1
 
         # Get the prepared inputs
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
-        completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
+        completion_ids, completion_mask = (
+            inputs["completion_ids"],
+            inputs["completion_mask"],
+        )
         multimodal_inputs = inputs["multimodal_inputs"]
-        
+
         # Concatenate for full sequence
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
 
         # Get the current policy's log probabilities
-        per_token_logps = self._get_per_token_logps(model, input_ids, attention_mask, **multimodal_inputs)
+        per_token_logps = self._get_per_token_logps(
+            model, input_ids, attention_mask, **multimodal_inputs
+        )
         # Get rid of the prompt (-1 because of the shift done in get_per_token_logps)
-        per_token_logps = per_token_logps[:, prompt_ids.size(1) - 1:]
+        per_token_logps = per_token_logps[:, prompt_ids.size(1) - 1 :]
 
         # Get the advantages from inputs
         advantages = inputs["advantages"]
 
         # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip its computation
         # and use per_token_logps.detach() instead
-        old_per_token_logps = inputs["old_per_token_logps"] if self.num_iterations > 1 else per_token_logps.detach()
+        old_per_token_logps = (
+            inputs["old_per_token_logps"]
+            if self.num_iterations > 1
+            else per_token_logps.detach()
+        )
 
         # Compute the policy ratio and clipped version
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
@@ -764,25 +953,39 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # Add KL penalty if beta > 0
         if self.beta > 0:
             ref_per_token_logps = inputs["ref_per_token_logps"]
-            per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
+            per_token_kl = (
+                torch.exp(ref_per_token_logps - per_token_logps)
+                - (ref_per_token_logps - per_token_logps)
+                - 1
+            )
             per_token_loss = per_token_loss + self.beta * per_token_kl
 
             # Log KL divergence
-            mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-            self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
+            mean_kl = (
+                (per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)
+            ).mean()
+            self._metrics["kl"].append(
+                self.accelerator.gather_for_metrics(mean_kl).mean().item()
+            )
 
         # Compute final loss
-        loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        loss = (
+            (per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)
+        ).mean()
 
         # Log clip ratio
         is_clipped = (per_token_loss1 < per_token_loss2).float()
         clip_ratio = (is_clipped * completion_mask).sum() / completion_mask.sum()
-        self._metrics["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
+        self._metrics["clip_ratio"].append(
+            self.accelerator.gather_for_metrics(clip_ratio).mean().item()
+        )
 
         return loss
 
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
-        metrics = {key: sum(val) / len(val) for key, val in self._metrics.items()}  # average the metrics
+        metrics = {
+            key: sum(val) / len(val) for key, val in self._metrics.items()
+        }  # average the metrics
         logs = {**logs, **metrics}
         if version.parse(transformers.__version__) >= version.parse("4.47.0.dev0"):
             super().log(logs, start_time)
@@ -810,7 +1013,9 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         if not self.is_world_process_zero():
             return
 
-        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(
+            self.model.config._name_or_path
+        ):
             base_model = self.model.config._name_or_path
         else:
             base_model = None
@@ -822,15 +1027,13 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         if hasattr(self.model.config, "unsloth_version"):
             tags.append("unsloth")
 
-        citation = textwrap.dedent(
-            """\
+        citation = textwrap.dedent("""\
             @article{zhihong2024deepseekmath,
                 title        = {{DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models}},
                 author       = {Zhihong Shao and Peiyi Wang and Qihao Zhu and Runxin Xu and Junxiao Song and Mingchuan Zhang and Y. K. Li and Y. Wu and Daya Guo},
                 year         = 2024,
                 eprint       = {arXiv:2402.03300},
-            """
-        )
+            """)
 
         model_card = generate_model_card(
             base_model=base_model,
@@ -838,7 +1041,11 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=(
+                wandb.run.get_url()
+                if is_wandb_available() and wandb.run is not None
+                else _get_swanlab_run_url()
+            ),
             comet_url=get_comet_experiment_url(),
             trainer_name="GRPO",
             trainer_citation=citation,
@@ -848,14 +1055,14 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
 
-    def _get_train_sampler(self) -> Sampler:
+    def _get_train_sampler(self, dataset=None) -> Sampler:
         """Returns a sampler that ensures proper data sampling for GRPO training."""
         effective_batch_size = (
             self.args.per_device_train_batch_size
             * self.accelerator.num_processes
             * self.args.gradient_accumulation_steps
         )
-        
+
         return RepeatRandomSampler(
             data_source=self.train_dataset,
             mini_repeat_count=self.num_generations,
@@ -872,7 +1079,16 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             seed=self.args.seed,
         )
 
-    def _log_training_details(self, prompts, completions, completion_ids, rewards_per_func, image_paths, bbox_point_GT=None, rewards_to_log=None):
+    def _log_training_details(
+        self,
+        prompts,
+        completions,
+        completion_ids,
+        rewards_per_func,
+        image_paths,
+        bbox_point_GT=None,
+        rewards_to_log=None,
+    ):
         """record training details to a log file for debugging purposes"""
         try:
             # get the log file path from environment variables
@@ -902,12 +1118,22 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                     user_message = prompt[1] if len(prompt) > 1 else prompt[0]
                     if isinstance(user_message, dict):
                         # regular text content
-                        if "content" in user_message and isinstance(user_message["content"], str):
+                        if "content" in user_message and isinstance(
+                            user_message["content"], str
+                        ):
                             prompt_text = user_message["content"]
                         # multimodal content (e.g., containing images and text)
-                        elif "content" in user_message and isinstance(user_message["content"], list):
-                            text_contents = [item["text"] for item in user_message["content"]
-                                            if isinstance(item, dict) and "type" in item and item["type"] == "text" and "text" in item]
+                        elif "content" in user_message and isinstance(
+                            user_message["content"], list
+                        ):
+                            text_contents = [
+                                item["text"]
+                                for item in user_message["content"]
+                                if isinstance(item, dict)
+                                and "type" in item
+                                and item["type"] == "text"
+                                and "text" in item
+                            ]
                             prompt_text = "\n".join([t for t in text_contents if t])
                         else:
                             prompt_text = str(user_message)
@@ -918,7 +1144,11 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                     prompt_text = str(prompt)
 
                 completion = completions[i]
-                if isinstance(completion, list) and len(completion) > 0 and isinstance(completion[0], dict):
+                if (
+                    isinstance(completion, list)
+                    and len(completion) > 0
+                    and isinstance(completion[0], dict)
+                ):
                     # process dialog format
                     completion_text = completion[0].get("content", "")
                 else:
@@ -942,7 +1172,9 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                 reward_scores = {}
                 for j, reward_func in enumerate(self.reward_funcs):
                     if isinstance(reward_func, PreTrainedModel):
-                        reward_func_name = reward_func.config._name_or_path.split("/")[-1]
+                        reward_func_name = reward_func.config._name_or_path.split("/")[
+                            -1
+                        ]
                     else:
                         reward_func_name = reward_func.__name__
                     reward_scores[reward_func_name] = rewards_per_func[i, j].item()
@@ -995,8 +1227,11 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                 f.write(f"{'='*80}\n")
                 f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"Training Step: {self.state.global_step}\n")
-                f.write(f"image_paths: {type(image_paths)}, length: {len(image_paths) if hasattr(image_paths, '__len__') else 'N/A'}\n")
+                f.write(
+                    f"image_paths: {type(image_paths)}, length: {len(image_paths) if hasattr(image_paths, '__len__') else 'N/A'}\n"
+                )
                 import traceback
+
                 f.write(traceback.format_exc())
                 f.write(f"{'='*80}\n\n")
 
@@ -1010,7 +1245,9 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         """
         try:
             # Decode completions without skipping special tokens to preserve exact token structure
-            raw_completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=False)
+            raw_completions = self.processing_class.batch_decode(
+                completion_ids, skip_special_tokens=False
+            )
 
             # Calculate think completion length for each completion
             think_lengths = []
@@ -1021,25 +1258,29 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
                 if think_start != -1 and think_end != -1 and think_end > think_start:
                     # Extract content between tags
-                    think_content = text[think_start + len("<think>"):think_end]
+                    think_content = text[think_start + len("<think>") : think_end]
 
                     # Encode to get token count
-                    if hasattr(self.processing_class, 'tokenizer'):
+                    if hasattr(self.processing_class, "tokenizer"):
                         # Use the tokenizer to encode the think content
-                        think_tokens = self.processing_class.tokenizer.encode(think_content, add_special_tokens=False)    
+                        think_tokens = self.processing_class.tokenizer.encode(
+                            think_content, add_special_tokens=False
+                        )
                     else:
-                        think_tokens = self.processing_class._tokenizer.encode(think_content, add_special_tokens=False)    
+                        think_tokens = self.processing_class._tokenizer.encode(
+                            think_content, add_special_tokens=False
+                        )
                     think_lengths.append(len(think_tokens))
                 else:
                     think_lengths.append(0)
 
             # Calculate the average length
-            avg_think_completion_length = sum(think_lengths) / len(think_lengths) if think_lengths else 0
+            avg_think_completion_length = (
+                sum(think_lengths) / len(think_lengths) if think_lengths else 0
+            )
 
             # Record the average length in metrics
             # self._metrics["think_completion_length"] = self._metrics.get("think_completion_length", []) + [avg_think_completion_length]
             self._metrics["think_completion_length"].append(avg_think_completion_length)
         except:
             pass
-
-

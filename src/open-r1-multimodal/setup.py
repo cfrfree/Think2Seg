@@ -21,7 +21,6 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
-
 # Remove stale open_r1.egg-info directory to avoid https://github.com/pypa/pip/issues/5466
 stale_egg_info = Path(__file__).parent / "open_r1.egg-info"
 if stale_egg_info.exists():
@@ -60,8 +59,8 @@ _deps = [
     "pytest",
     "safetensors>=0.3.3",
     "sentencepiece>=0.1.99",
-    "torch==2.6.0",
-    "transformers==4.49.0",
+    "torch>=2.6.0",
+    "transformers>=4.49.0",
     "trl>=0.17.0",
     "vllm==0.6.6.post1",
     "wandb>=0.19.1",
@@ -74,7 +73,13 @@ _deps = [
 # packaging: "packaging"
 #
 # some of the values are versioned whereas others aren't.
-deps = {b: a for a, b in (re.findall(r"^(([^!=<>~ \[\]]+)(?:\[[^\]]+\])?(?:[!=<>~ ].*)?$)", x)[0] for x in _deps)}
+deps = {
+    b: a
+    for a, b in (
+        re.findall(r"^(([^!=<>~ \[\]]+)(?:\[[^\]]+\])?(?:[!=<>~ ].*)?$)", x)[0]
+        for x in _deps
+    )
+}
 
 
 def deps_list(*pkgs):

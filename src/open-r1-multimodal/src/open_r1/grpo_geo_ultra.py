@@ -23,19 +23,39 @@ from trl import ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
 from open_r1.vlm_modules import *
 
-# ----------------------- Fix the flash attention bug in the current version of transformers -----------------------
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionFlashAttention2, apply_rotary_pos_emb_flashatt, flash_attn_varlen_func
-import torch
-import numpy as np
-from typing import Tuple
-from transformers.utils import logging
 from open_r1.dataset.combind_datasets import create_combined_dataset
 from open_r1.trainer.geo_grpo_trainer_ultra import Geo_VLMGRPOTrainer_ultra
 from open_r1.geo_reward_func_ultra import GEO_Reward_Func_Ultra
 
-logger = logging.get_logger(__name__)
+def _init_swanlab():
+    """Lazy-init swanlab (avoids import-time env var parsing issues)."""
+    try:
+        from swanlab.integration.transformers import SwanLabCallback
+        import swanlab
+        return SwanLabCallback, swanlab, True
+    except Exception:
+        return None, None, False
 
-def custom_forward(
+
+def apply_qwen25_flash_attn_fix():
+    """Apply monkey-patch for Qwen2.5-VL flash attention bug in older transformers.
+    In transformers >=5.x this class was renamed/removed, so the fix is skipped."""
+    try:
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VLVisionFlashAttention2,
+            apply_rotary_pos_emb_flashatt,
+            flash_attn_varlen_func,
+        )
+    except ImportError:
+        print("Qwen2_5_VLVisionFlashAttention2 not found in this transformers version, skipping flash attn fix.")
+        return
+    import torch
+    from typing import Optional, Tuple
+    from transformers.utils import logging
+
+    _logger = logging.get_logger(__name__)
+
+    def custom_forward(
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
@@ -43,10 +63,14 @@ def custom_forward(
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        # print(111, 222, 333, 444, 555, 666, 777, 888, 999)
+        q, k, v = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
         if position_embeddings is None:
-            logger.warning_once(
+            _logger.warning_once(
                 "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
                 "through `rotary_pos_emb` (2D tensor of RoPE theta values), to using externally computed "
                 "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.54 `rotary_pos_emb` will be "
@@ -57,7 +81,6 @@ def custom_forward(
             sin = emb.sin().float()
         else:
             cos, sin = position_embeddings
-            # Add this
             cos = cos.to(torch.float)
             sin = sin.to(torch.float)
         q, k = apply_rotary_pos_emb_flashatt(q.unsqueeze(0), k.unsqueeze(0), cos, sin)
@@ -65,19 +88,21 @@ def custom_forward(
         k = k.squeeze(0)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
-            seq_length, -1
-        )
+        attn_output = flash_attn_varlen_func(
+            q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen
+        ).reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
 
-Qwen2_5_VLVisionFlashAttention2.forward = custom_forward
+    Qwen2_5_VLVisionFlashAttention2.forward = custom_forward
+
 
 @dataclass
 class GRPOScriptArguments(ScriptArguments):
     """
     Script arguments for the GRPO training script.
     """
+
     data_file_paths: str = field(
         default=None,
         metadata={"help": "Paths to data files, separated by ':'"},
@@ -112,32 +137,36 @@ class GRPOScriptArguments(ScriptArguments):
     )
     max_anyres_num: Optional[int] = field(
         default=12,
-        metadata={"help": "Maximum number of anyres blocks for the image (for InternVL)"},
+        metadata={
+            "help": "Maximum number of anyres blocks for the image (for InternVL)"
+        },
     )
     reward_method: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Choose reward method: 'default', 'mcp', ..."
-        },
+        metadata={"help": "Choose reward method: 'default', 'mcp', ..."},
     )
     sam_model_size: Optional[str] = field(
-        default='tiny',
+        default="tiny",
         metadata={"help": "Size of SAM model to use"},
     )
     sam_root: Optional[str] = field(
-        default='../../sam2',
+        default="../../sam2",
         metadata={"help": "Root directory of SAM model"},
     )
     sam_device: Optional[str] = field(
-        default='cpu',
+        default="cpu",
         metadata={"help": "Device to use for SAM model"},
     )
+    sam_version: Optional[str] = field(
+        default="sam2",
+        metadata={"help": "SAM version: 'sam2' or 'sam3'"},
+    )
     use_datasets: Optional[str] = field(
-        default='earthreason',
+        default="earthreason",
         metadata={"help": "Comma-separated list of datasets to use."},
     )
     earthreason_root: Optional[str] = field(
-         default='',
+        default="",
         metadata={"help": "Root directory for EarthReason dataset"},
     )
     earthreason_resize_size: Optional[int] = field(
@@ -146,17 +175,20 @@ class GRPOScriptArguments(ScriptArguments):
     )
 
 
-
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
     completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents]
+    matches = [
+        re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents
+    ]
 
     current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
     if os.getenv("DEBUG_MODE") == "true":
         log_path = os.getenv("LOG_PATH")
-        with open(log_path.replace(".txt", "_format_reward.txt"), "a", encoding='utf-8') as f:
+        with open(
+            log_path.replace(".txt", "_format_reward.txt"), "a", encoding="utf-8"
+        ) as f:
             f.write(f"\n{'='*50}\n")
             f.write(f"------------- {current_time} Format reward -------------\n")
             for content, match in zip(completion_contents, matches):
@@ -182,6 +214,7 @@ def get_vlm_module(model_name_or_path):
     else:
         raise ValueError(f"Unsupported model: {model_name_or_path}")
 
+
 def main(script_args, training_args, model_args):
 
     # import random
@@ -191,37 +224,59 @@ def main(script_args, training_args, model_args):
     # if torch.cuda.is_available():
     #     torch.cuda.manual_seed(training_args.seed)
     #     torch.cuda.manual_seed_all(training_args.seed)
-    
+
+    # Patch DeepSpeed compatibility with transformers 5.x (use_cache kwarg removed)
+    from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3_5ForConditionalGeneration
+    for _model_cls in (Qwen2_5_VLForConditionalGeneration, Qwen3_5ForConditionalGeneration):
+        _orig_init = _model_cls.__init__
+        def _make_patched_init(orig_init):
+            def _patched_init(self, *args, use_cache=None, **kwargs):
+                kwargs.pop('use_cache', None)
+                return orig_init(self, *args, **kwargs)
+            return _patched_init
+        _model_cls.__init__ = _make_patched_init(_orig_init)
+
     # Load the VLM module
     vlm_module_cls = get_vlm_module(model_args.model_name_or_path)
     print("using vlm module:", vlm_module_cls.__name__)
+
+    # Apply Qwen2.5-VL flash attention fix only when using Qwen2.5-VL
+    if "Qwen2.5" in model_args.model_name_or_path:
+        apply_qwen25_flash_attn_fix()
 
     reward_funcs = []
 
     ################ GEO_Reward_Func_Ultra #############
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = f"cuda:{local_rank}" 
+    device = f"cuda:{local_rank}"
 
-    geo_reward_func = GEO_Reward_Func_Ultra(script_args.sam_model_size, script_args.sam_root, device)
+    geo_reward_func = GEO_Reward_Func_Ultra(
+        sam_model_size=script_args.sam_model_size,
+        sam_root=script_args.sam_root,
+        device=device,
+        sam_version=script_args.sam_version,
+    )
     reward_funcs.append(geo_reward_func.sam_reward_func_ultra)
     reward_funcs.append(geo_reward_func.sam_format_reward)
     reward_funcs.append(geo_reward_func.thk_ans_format_reward)
 
-
     print("reward_funcs:", reward_funcs)
 
     # Load the datasets based on user configuration
-    datasets_to_use = script_args.use_datasets.split(',')
+    datasets_to_use = script_args.use_datasets.split(",")
     available_datasets = []
 
     # Import required dataset classes
     # Initialize selected datasets
-    if 'earthreason' in datasets_to_use:
+    if "earthreason" in datasets_to_use:
         from open_r1.dataset.EarthReason_datasets import EarthReasonDataset
+
         print(f"Loading EarthReason dataset from {script_args.earthreason_root}...")
-        earthreason_dataset = EarthReasonDataset(data_dir=script_args.earthreason_root, 
-                                                 split=['train'],
-                                                 resize_size=script_args.earthreason_resize_size)
+        earthreason_dataset = EarthReasonDataset(
+            data_dir=script_args.earthreason_root,
+            split=["train"],
+            resize_size=script_args.earthreason_resize_size,
+        )
         available_datasets.append(earthreason_dataset)
     # if 'refsegrs' in datasets_to_use:
     #     from open_r1.dataset.RefSegRS_datasets import RefSegRSDataset
@@ -232,7 +287,7 @@ def main(script_args, training_args, model_args):
     # if 'rrsisd' in datasets_to_use:
     #     from open_r1.dataset.rrsisd_datasets import RRSISD_Dataset
     #     print(f"Loading RRSIS-D dataset from {script_args.rrsisd_root}...")
-    #     rrsisd_dataset = RRSISD_Dataset(data_dir=script_args.rrsisd_root, 
+    #     rrsisd_dataset = RRSISD_Dataset(data_dir=script_args.rrsisd_root,
     #                                              split='train')
     #     available_datasets.append(rrsisd_dataset)
     # if 'risbench' in datasets_to_use:
@@ -252,24 +307,57 @@ def main(script_args, training_args, model_args):
         print("Using single dataset...")
         dataset = available_datasets[0]
     else:
-        raise ValueError("No datasets were loaded. Please check your dataset configuration.")
+        raise ValueError(
+            "No datasets were loaded. Please check your dataset configuration."
+        )
 
     from torch.utils.data import random_split
-    splits = {'train': dataset}
+
+    splits = {"train": dataset}
     script_args.val_split_ratio = 0.0
     if script_args.val_split_ratio > 0:
         val_size = int(len(dataset) * script_args.val_split_ratio)
         train_size = len(dataset) - val_size
 
-        # random_split 
+        # random_split
         train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-        splits['train'] = train_dataset
-        splits['validation'] = val_dataset
-        print(f"Dataset split into train ({len(train_dataset)} samples) and validation ({len(val_dataset)} samples)")
+        splits["train"] = train_dataset
+        splits["validation"] = val_dataset
+        print(
+            f"Dataset split into train ({len(train_dataset)} samples) and validation ({len(val_dataset)} samples)"
+        )
     else:
-        print(f"No validation split requested. Using entire dataset ({len(dataset)} samples) for training.")
+        print(
+            f"No validation split requested. Using entire dataset ({len(dataset)} samples) for training."
+        )
 
-
+    # Handle swanlab reporting
+    swanlab_callback = None
+    report_to = getattr(training_args, "report_to", "none")
+    if report_to and "swanlab" in (
+        report_to if isinstance(report_to, list) else [report_to]
+    ):
+        SwanLabCallback, swanlab, _has_swanlab = _init_swanlab()
+        if not _has_swanlab:
+            raise ImportError("swanlab not installed. Run: pip install swanlab")
+        swanlab_api_key = os.environ.get("SWANLAB_API_KEY", "")
+        swanlab.login(swanlab_api_key)
+        swanlab_project = os.environ.get("SWANLAB_PROJECT", "Think2Seg-RS")
+        swanlab_experiment = os.environ.get(
+            "SWANLAB_EXPERIMENT", script_args.run_name or "grpo-geo-ultra"
+        )
+        swanlab.init(project=swanlab_project, experiment_name=swanlab_experiment)
+        swanlab_callback = SwanLabCallback()
+        print(
+            f"SwanLab initialized: project={swanlab_project}, experiment={swanlab_experiment}"
+        )
+        # Disable HuggingFace built-in reporting (swanlab handles it)
+        if isinstance(report_to, list):
+            training_args.report_to = [r for r in report_to if r != "swanlab"] or [
+                "none"
+            ]
+        else:
+            training_args.report_to = "none"
 
     # Select trainer class based on vlm_trainer argument
     trainer_cls = Geo_VLMGRPOTrainer_ultra
@@ -277,13 +365,16 @@ def main(script_args, training_args, model_args):
 
     # Initialize the GRPO trainer
     trainer = trainer_cls(
+        callbacks=[swanlab_callback] if swanlab_callback else None,
         model=model_args.model_name_or_path,
         reward_funcs=reward_funcs,
         # reward_weights=reward_weights,
         args=training_args,
         vlm_module=vlm_module_cls(),
-        train_dataset=splits['train'],
-        eval_dataset=splits.get('validation') if training_args.eval_strategy != "no" else None,
+        train_dataset=splits["train"],
+        eval_dataset=(
+            splits.get("validation") if training_args.eval_strategy != "no" else None
+        ),
         peft_config=get_peft_config(model_args),
         freeze_vision_modules=model_args.freeze_vision_modules,
         attn_implementation=model_args.attn_implementation,

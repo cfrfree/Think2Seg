@@ -14,9 +14,16 @@ import sys
 import cv2
 from matplotlib.patches import Polygon
 import PIL
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "open-r1-multimodal/src"))
+
+sys.path.append(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "open-r1-multimodal/src",
+    )
+)
 
 import warnings
+
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 from transformers import (
@@ -36,46 +43,101 @@ from transformers import (
 )
 import datetime
 import torch.distributed as dist
+
+
 def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank) 
-    
-    dist.init_process_group(backend="nccl", 
-                            timeout=datetime.timedelta(hours=1))
-    
+    torch.cuda.set_device(local_rank)
+
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=1))
+
     world_size = dist.get_world_size()
     rank = dist.get_rank()
-    
+
     return local_rank, world_size, rank
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Test SAM segmentation model with GEOBench dataset')
-    parser.add_argument('--model_path', type=str, default='')
-    parser.add_argument('--output_dir', type=str, default='./geo_results', help='Output directory for visualizations')
-    parser.add_argument('--sam_model_size', type=str, default='small', help='SAM model size (tiny, small, base_plus, large)')
-    parser.add_argument('--sam_root', type=str, default='', help='Root directory for SAM model')
-    parser.add_argument('--sam_device', type=str, default='cuda:1', help='Device to use (cuda or cpu) for sam')
-    parser.add_argument('--num_samples', type=int, default=100, help='Number of samples to test')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for inference')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--save_results', action='store_true', help='Save results to JSON file')
-    parser.add_argument('--visualize_num', type=int, default=50, help='Number of samples to visualize')
-    parser.add_argument('--dataset', type=str, default='earthreason', help='Dataset to use for evaluation.')
-    parser.add_argument('--refsegrs_root', type=str, default='', help='Root directory for RefSegRS dataset')
-    parser.add_argument('--earthreason_root', type=str, default='', help='Root directory for EarthReason dataset')
-    parser.add_argument('--rrsisd_root', type=str, default='', help='Root directory for RRSIS-D dataset')
-    parser.add_argument('--split', type=str, default='test', help='Dataset split to use (train, val, test)')
-    parser.add_argument('--resize_size', type=int, default=840, help='Resize size for input images')
-
+    parser = argparse.ArgumentParser(
+        description="Test SAM segmentation model with GEOBench dataset"
+    )
+    parser.add_argument("--model_path", type=str, default="")
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./geo_results",
+        help="Output directory for visualizations",
+    )
+    parser.add_argument(
+        "--sam_model_size",
+        type=str,
+        default="small",
+        help="SAM model size (tiny, small, base_plus, large)",
+    )
+    parser.add_argument(
+        "--sam_root", type=str, default="", help="Root directory for SAM model"
+    )
+    parser.add_argument(
+        "--sam_device",
+        type=str,
+        default="cuda:1",
+        help="Device to use (cuda or cpu) for sam",
+    )
+    parser.add_argument(
+        "--sam_version", type=str, default="sam2", help="SAM version: 'sam2' or 'sam3'"
+    )
+    parser.add_argument(
+        "--num_samples", type=int, default=100, help="Number of samples to test"
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=4, help="Batch size for inference"
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--save_results", action="store_true", help="Save results to JSON file"
+    )
+    parser.add_argument(
+        "--visualize_num", type=int, default=50, help="Number of samples to visualize"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="earthreason",
+        help="Dataset to use for evaluation.",
+    )
+    parser.add_argument(
+        "--refsegrs_root",
+        type=str,
+        default="",
+        help="Root directory for RefSegRS dataset",
+    )
+    parser.add_argument(
+        "--earthreason_root",
+        type=str,
+        default="",
+        help="Root directory for EarthReason dataset",
+    )
+    parser.add_argument(
+        "--rrsisd_root", type=str, default="", help="Root directory for RRSIS-D dataset"
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        help="Dataset split to use (train, val, test)",
+    )
+    parser.add_argument(
+        "--resize_size", type=int, default=840, help="Resize size for input images"
+    )
 
     return parser.parse_args()
 
+
 def extract_sam_json(content):
     """Parses the model output content to extract the JSON answer."""
-    answer_pattern = r'<answer>(.*?)</answer>'
-    json_pattern = r'```json\s*(.*?)\s*```'
-    
+    answer_pattern = r"<answer>(.*?)</answer>"
+    json_pattern = r"```json\s*(.*?)\s*```"
+
     answer_match = re.search(answer_pattern, content, re.DOTALL)
     if answer_match:
         answer_content = answer_match.group(1).strip()
@@ -96,36 +158,80 @@ def extract_sam_json(content):
                         return None
     return None
 
-def show_mask(mask, ax, random_color=False, borders = True):
+
+def show_mask(mask, ax, random_color=False, borders=True):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
     else:
-        color = np.array([30/255, 144/255, 255/255, 0.6])
+        color = np.array([30 / 255, 144 / 255, 255 / 255, 0.6])
     h, w = mask.shape[-2:]
     mask = mask.astype(np.uint8)
-    mask_image =  mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
     if borders:
-        contours, _ = cv2.findContours(mask,cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         # Try to smooth contours
-        contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
-        mask_image = cv2.drawContours(mask_image, contours, -1, (1, 1, 1, 0.5), thickness=2) 
+        contours = [
+            cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours
+        ]
+        mask_image = cv2.drawContours(
+            mask_image, contours, -1, (1, 1, 1, 0.5), thickness=2
+        )
     ax.imshow(mask_image)
 
+
 def show_points(coords, labels, ax, marker_size=375):
-    pos_points = coords[labels==1]
-    neg_points = coords[labels==0]
-    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
-    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
+    pos_points = coords[labels == 1]
+    neg_points = coords[labels == 0]
+    ax.scatter(
+        pos_points[:, 0],
+        pos_points[:, 1],
+        color="green",
+        marker="*",
+        s=marker_size,
+        edgecolor="white",
+        linewidth=1.25,
+    )
+    ax.scatter(
+        neg_points[:, 0],
+        neg_points[:, 1],
+        color="red",
+        marker="*",
+        s=marker_size,
+        edgecolor="white",
+        linewidth=1.25,
+    )
+
 
 def show_box(box, ax):
     x0, y0 = box[0], box[1]
     w, h = box[2] - box[0], box[3] - box[1]
-    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='red', facecolor=(0, 0, 0, 0), lw=1.5, linestyle='--'))    
+    ax.add_patch(
+        plt.Rectangle(
+            (x0, y0),
+            w,
+            h,
+            edgecolor="red",
+            facecolor=(0, 0, 0, 0),
+            lw=1.5,
+            linestyle="--",
+        )
+    )
 
-def visualize_prediction(img, predicted_mask, gt_mask, extracted_answer, question_text, iou_reward, vis_path, bbox=None, gt_bbox=None):
+
+def visualize_prediction(
+    img,
+    predicted_mask,
+    gt_mask,
+    extracted_answer,
+    question_text,
+    iou_reward,
+    vis_path,
+    bbox=None,
+    gt_bbox=None,
+):
     """
     Create visualization image for prediction results
-    
+
     Args:
         img: PIL image object
         predicted_mask: Predicted mask
@@ -138,14 +244,14 @@ def visualize_prediction(img, predicted_mask, gt_mask, extracted_answer, questio
         gt_bbox: Ground truth bounding box
     """
     img_np = np.array(img)
-    
+
     # Create figure
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-    
+
     # First subplot: original image + prompts + predicted mask
     axes[0].imshow(img_np)
     show_mask(predicted_mask, axes[0])
-    
+
     if bbox is not None:
         show_box(bbox, axes[0])
 
@@ -160,7 +266,7 @@ def visualize_prediction(img, predicted_mask, gt_mask, extracted_answer, questio
             if box_coords:
                 box_coords = np.array(box_coords)
                 show_box(box_coords, axes[0])
-            
+
             # Handle points
             positive_points = instance.get("positive_points", [])
             negative_points = instance.get("negative_points", [])
@@ -171,10 +277,10 @@ def visualize_prediction(img, predicted_mask, gt_mask, extracted_answer, questio
                 points_coords = np.array(input_points)
                 points_labels = np.array(input_label)
                 show_points(points_coords, points_labels, axes[0])
-    
+
     axes[0].set_title("predicted mask")
-    axes[0].axis('off')
-    
+    axes[0].axis("off")
+
     # Second subplot: original image + predicted mask
     axes[1].imshow(img_np)
     show_mask(gt_mask, axes[1], borders=False)
@@ -186,8 +292,8 @@ def visualize_prediction(img, predicted_mask, gt_mask, extracted_answer, questio
                 # ins_box = np.array(ins_box)
                 show_box(ins_box, axes[1])
     axes[1].set_title("GT mask")
-    axes[1].axis('off')
-    
+    axes[1].axis("off")
+
     # Add question text as overall title
     quoted_content = re.findall(r'"([^"]*)"', question_text)
     if quoted_content:
@@ -195,78 +301,94 @@ def visualize_prediction(img, predicted_mask, gt_mask, extracted_answer, questio
     else:
         text = question_text  # If no quotes, use original text
     # Add question text as overall title
-    plt.suptitle(f"question: {text}\nIoU: {iou_reward if iou_reward is not None else 'N/A'}", fontsize=12)
-    
+    plt.suptitle(
+        f"question: {text}\nIoU: {iou_reward if iou_reward is not None else 'N/A'}",
+        fontsize=12,
+    )
+
     plt.tight_layout()
-    plt.savefig(vis_path, dpi=200, bbox_inches='tight')
+    plt.savefig(vis_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+
 
 def parse_model_path(model_path):
     """Extract RUN_NAME and STEP from model path"""
     # Model path format: /path/to/output/RUN_NAME/checkpoint-STEP
-    parts = model_path.split('/')
-    
+    parts = model_path.split("/")
+
     # Get the last two parts: RUN_NAME and checkpoint-STEP
-    if 'checkpoint-' in parts[-1]:
+    if "checkpoint-" in parts[-1]:
         run_name = parts[-2]
-        step = parts[-1].split('-')[-1]
+        step = parts[-1].split("-")[-1]
     else:
         # If model path doesn't contain checkpoint
         run_name = parts[-1]
-        step = 'final'
-        
+        step = "final"
+
     return run_name, step
+
 
 def main(local_rank, world_size, rank):
     args = parse_args()
-    
+
     # Set random seed
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
+
     # Initialize vlm_module (consistent with training)
     from open_r1.vlm_modules.qwen_module import Qwen2VLModule
+
     vlm_module = Qwen2VLModule()
 
     # Extract RUN_NAME and STEP from model path
     run_name, step = parse_model_path(args.model_path)
-    
+
     # Create output directory
     # out_dir = os.path.join(args.output_dir, f"{run_name}_step{step}_{args.sam_model_size}")
-    out_dir = os.path.join(args.output_dir, f"step{step}_{args.sam_model_size}_{args.split}")
+    out_dir = os.path.join(
+        args.output_dir, f"step{step}_{args.sam_model_size}_{args.split}"
+    )
     os.makedirs(out_dir, exist_ok=True)
-    
+
     # Load VLM model
     print(f"Loading VLM model from {args.model_path}...")
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model_cls = vlm_module.get_model_class(args.model_path, {})
+    model = model_cls.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map={"": local_rank}, 
+        device_map={"": local_rank},
     )
     processor = AutoProcessor.from_pretrained(args.model_path)
 
-    if args.dataset == 'earthreason':
+    if args.dataset == "earthreason":
         from open_r1.dataset.EarthReason_datasets import EarthReasonDataset_test
-        dataset = EarthReasonDataset_test(data_dir=args.earthreason_root, split=args.split, resize_size=args.resize_size)
-    elif args.dataset == 'refsegrs':
+
+        dataset = EarthReasonDataset_test(
+            data_dir=args.earthreason_root,
+            split=args.split,
+            resize_size=args.resize_size,
+        )
+    elif args.dataset == "refsegrs":
         from open_r1.dataset.RefSegRS_datasets import RefSegRSDataset
+
         dataset = RefSegRSDataset(data_root=args.refsegrs_root, split=args.split)
-    elif args.dataset == 'rrsisd':
+    elif args.dataset == "rrsisd":
         from open_r1.dataset.rrsisd_datasets import RRSISD_Dataset
+
         dataset = RRSISD_Dataset(data_dir=args.rrsisd_root, split=args.split)
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
-    
+
     if (args.num_samples < len(dataset)) and (args.num_samples > 0):
         indices = random.sample(range(len(dataset)), args.num_samples)
         data = [dataset[i] for i in indices]
     else:
         data = [dataset[i] for i in range(len(dataset))]
-    
+
     print(f"Testing on {len(data)} samples...")
-    
+
     # Split data for distributed evaluation
     per_rank_data = len(data) // world_size
     start_idx = rank * per_rank_data
@@ -277,45 +399,45 @@ def main(local_rank, world_size, rank):
 
     messages = []
     for sample in rank_data:
-        image_path = os.path.join(sample['image_path'])
+        image_path = os.path.join(sample["image_path"])
 
-        message = sample['prompt']
-        message[1]['content'][0]['image'] = f'file://{image_path}'
+        message = sample["prompt"]
+        message[1]["content"][0]["image"] = f"file://{image_path}"
 
         messages.append(message)
 
-    rank_outputs = {
-        'text': [],
-        'reward': [],
-        'masks': []
-    }
+    rank_outputs = {"text": [], "reward": [], "masks": []}
     all_outputs = []  # List to store all answers
 
     # Process data
     for i in tqdm(range(0, len(messages), args.batch_size), desc=f"Rank {rank}"):
-        batch_messages = messages[i:i + args.batch_size]
-        batch_data = rank_data[i:i + args.batch_size]
+        batch_messages = messages[i : i + args.batch_size]
+        batch_data = rank_data[i : i + args.batch_size]
 
         prompts_text = vlm_module.prepare_prompt(processor, batch_data)
-        
+
         images = []
         for x in batch_data:
             if "image" in x:
                 imgs = [x["image"]] if not isinstance(x["image"], list) else x["image"]
             elif "image_path" in x and x["image_path"] is not None:
-                img_paths = [x["image_path"]] if not isinstance(x["image_path"], list) else x["image_path"]
+                img_paths = (
+                    [x["image_path"]]
+                    if not isinstance(x["image_path"], list)
+                    else x["image_path"]
+                )
                 imgs = [PIL.Image.open(p) for p in img_paths]
-            
+
             for img in imgs:
                 try:
                     w, h = img.size
                     if w < 28 or h < 28:
                         if w < h:
                             new_w = 28
-                            new_h = int(h * (28/w))
+                            new_h = int(h * (28 / w))
                         else:
                             new_h = 28
-                            new_w = int(w * (28/h))
+                            new_w = int(w * (28 / h))
                         img = img.resize((new_w, new_h), PIL.Image.Resampling.LANCZOS)
                 except:
                     pass
@@ -330,48 +452,61 @@ def main(local_rank, world_size, rank):
             padding_side="left",
             add_special_tokens=False,
         )
-        
-        inputs = {k: v.to(f"cuda:{local_rank}") if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+
+        inputs = {
+            k: v.to(f"cuda:{local_rank}") if isinstance(v, torch.Tensor) else v
+            for k, v in inputs.items()
+        }
 
         generation_config = GenerationConfig(
             max_new_tokens=2048,
             do_sample=False,
             temperature=1.0,
-            pad_token_id=processor.tokenizer.pad_token_id if hasattr(processor, 'tokenizer') else processor.pad_token_id,
+            pad_token_id=(
+                processor.tokenizer.pad_token_id
+                if hasattr(processor, "tokenizer")
+                else processor.pad_token_id
+            ),
             use_cache=True,
         )
-        
+
         if hasattr(vlm_module, "get_eos_token_id"):
             generation_config.eos_token_id = vlm_module.get_eos_token_id(processor)
 
         # Inference: Generation of the output
         with torch.no_grad():
             generated_ids = model.generate(
-                **{k: v for k, v in inputs.items() if k not in vlm_module.get_non_generate_params()},
-                generation_config=generation_config
+                **{
+                    k: v
+                    for k, v in inputs.items()
+                    if k not in vlm_module.get_non_generate_params()
+                },
+                generation_config=generation_config,
             )
-            
+
             prompt_length = inputs["input_ids"].size(1)
             if not vlm_module.is_embeds_input():
                 prompt_completion_ids = generated_ids
                 completion_ids = prompt_completion_ids[:, prompt_length:]
             else:
                 completion_ids = generated_ids
-        
+
         batch_output_text = processor.batch_decode(
             completion_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
-        
-        rank_outputs['text'].extend(batch_output_text)
+
+        rank_outputs["text"].extend(batch_output_text)
 
     print(f"Rank {rank} has finished processing {len(rank_outputs['text'])} examples")
 
     all_outputs = [None] * len(data)
-    rank_results = [(start_idx + i, output) for i, output in enumerate(rank_outputs['text'])]
+    rank_results = [
+        (start_idx + i, output) for i, output in enumerate(rank_outputs["text"])
+    ]
 
     gathered_results = [None] * world_size
     dist.all_gather_object(gathered_results, rank_results)
-    
+
     assert gathered_results[-1][-1][0] == len(data) - 1
 
     torch.cuda.empty_cache()
@@ -385,53 +520,72 @@ def main(local_rank, world_size, rank):
                 all_outputs[idx] = output
         assert all_outputs[-1] is not None
 
-        print(f"Initializing SAM model (size: {args.sam_model_size})...")
+        print(
+            f"Initializing SAM model (version: {args.sam_version}, size: {args.sam_model_size})..."
+        )
 
         from open_r1.geo_reward_func_ultra import GEO_Reward_Func_Ultra
+
         geo_reward_func_ultra = GEO_Reward_Func_Ultra(
             sam_model_size=args.sam_model_size,
             sam_root=args.sam_root,
-            device=args.sam_device
+            device=args.sam_device,
+            sam_version=args.sam_version,
         )
 
         final_output = []
         total_iou = 0.0
-        
+
         # Variables for gIoU and cIoU calculation
         total_intersection = 0.0  # cumulative intersection for cIoU
         total_union = 0.0  # cumulative union for cIoU
         valid_samples = 0  # count of samples with valid predictions
 
-        for i, (input_example, model_output) in tqdm(enumerate(zip(data, all_outputs)), total=len(data), desc="Processing samples"):
+        for i, (input_example, model_output) in tqdm(
+            enumerate(zip(data, all_outputs)),
+            total=len(data),
+            desc="Processing samples",
+        ):
             original_output = model_output
-            
-            extracted_answer, error_msg = geo_reward_func_ultra.parse_sam_json(original_output)
+
+            extracted_answer, error_msg = geo_reward_func_ultra.parse_sam_json(
+                original_output
+            )
             think_content = geo_reward_func_ultra.parse_think_content(original_output)
 
-            gt_mask = input_example['GT_mask']
-            img = input_example['image']
+            gt_mask = input_example["GT_mask"]
+            img = input_example["image"]
 
             rewards, all_details = geo_reward_func_ultra.sam_iou_reward_func_ultra_test(
-                [[({"content": original_output})]],
-                [gt_mask],
-                [img],
-                return_details=True
+                [[{"content": original_output}]], [gt_mask], [img], return_details=True
             )
             iou_reward = rewards[0]
-            union = all_details['union'][0]
-            intersection = all_details['intersection'][0]
+            union = all_details["union"][0]
+            intersection = all_details["intersection"][0]
 
-            thk_ans_format_reward = geo_reward_func_ultra.thk_ans_format_reward([[({"content": original_output})]])
-            sam_format_reward = geo_reward_func_ultra.sam_format_reward([[({"content": original_output})]])
-            
-            data_idx = input_example['data_idx']
+            thk_ans_format_reward = geo_reward_func_ultra.thk_ans_format_reward(
+                [[{"content": original_output}]]
+            )
+            sam_format_reward = geo_reward_func_ultra.sam_format_reward(
+                [[{"content": original_output}]]
+            )
 
-            predicted_mask = all_details['pred_masks'][0] if all_details['pred_masks'][0] is not None else None
-            
+            data_idx = input_example["data_idx"]
+
+            predicted_mask = (
+                all_details["pred_masks"][0]
+                if all_details["pred_masks"][0] is not None
+                else None
+            )
+
             # Update cumulative metrics only for valid predictions
             if iou_reward is not None:
                 total_iou += iou_reward
-            if predicted_mask is not None and intersection is not None and union is not None:
+            if (
+                predicted_mask is not None
+                and intersection is not None
+                and union is not None
+            ):
                 total_intersection += intersection
                 total_union += union
                 valid_samples += 1
@@ -439,56 +593,66 @@ def main(local_rank, world_size, rank):
                 valid_samples += 1
             else:
                 total_union += np.sum(gt_mask > 0)
-            
+
             # visualization
-            if args.save_results and predicted_mask is not None and i <= args.visualize_num:
+            if (
+                args.save_results
+                and predicted_mask is not None
+                and i <= args.visualize_num
+            ):
                 vis_dir = os.path.join(out_dir, "visualizations")
                 os.makedirs(vis_dir, exist_ok=True)
 
                 vis_path = os.path.join(vis_dir, f"sample_{i}.png")
-                question_text = input_example['prompt'][1]['content'][1]['text']
+                question_text = input_example["prompt"][1]["content"][1]["text"]
                 gt_bbox = None
-                
+
                 visualize_prediction(
-                    img=input_example['image'],
+                    img=input_example["image"],
                     predicted_mask=predicted_mask,
                     gt_mask=gt_mask,
                     extracted_answer=extracted_answer,
                     question_text=question_text,
                     iou_reward=iou_reward,
                     vis_path=vis_path,
-                    gt_bbox=gt_bbox
+                    gt_bbox=gt_bbox,
                 )
 
             result = {
-                'sample_id': i,
-                'image_shape': gt_mask.shape,
-                'image_path': input_example['image_path'],
-                'GT_mask_path': input_example['GT_mask_path'],
-                'question': input_example['prompt'][1]['content'][1]['text'],
-                'model_output': original_output,
-                'think_content': think_content,
-                'extracted_answer': extracted_answer,
-                'mask_iou_reward': float(iou_reward) if iou_reward is not None else 0.0,
-                'thk_ans_format_reward': thk_ans_format_reward[0] if thk_ans_format_reward is not None else 0.0,
-                'sam_format_reward': sam_format_reward[0] if sam_format_reward is not None else 0.0,
+                "sample_id": i,
+                "image_shape": gt_mask.shape,
+                "image_path": input_example["image_path"],
+                "GT_mask_path": input_example["GT_mask_path"],
+                "question": input_example["prompt"][1]["content"][1]["text"],
+                "model_output": original_output,
+                "think_content": think_content,
+                "extracted_answer": extracted_answer,
+                "mask_iou_reward": float(iou_reward) if iou_reward is not None else 0.0,
+                "thk_ans_format_reward": (
+                    thk_ans_format_reward[0]
+                    if thk_ans_format_reward is not None
+                    else 0.0
+                ),
+                "sam_format_reward": (
+                    sam_format_reward[0] if sam_format_reward is not None else 0.0
+                ),
             }
-            label = input_example.get('class_label_id', None)
+            label = input_example.get("class_label_id", None)
             if label is not None:
-                result['class_label_id'] = label
+                result["class_label_id"] = label
             final_output.append(result)
-        
+
         # Calculate gIoU (global IoU) and cIoU (cumulative IoU)
         if valid_samples > 0:
             # gIoU: average of per-image IoUs across all samples
             giou = total_iou / len(data)
-            
+
             # cIoU: cumulative intersection over cumulative union
             ciou = total_intersection / total_union if total_union > 0 else 0.0
         else:
             giou = 0.0
             ciou = 0.0
-        
+
         # gIoU
         mean_iou = giou
         print(f"\nvalid samples: {valid_samples}/{len(data)}")
@@ -496,21 +660,22 @@ def main(local_rank, world_size, rank):
         print(f"cIoU : {ciou:.4f}")
 
         save_dict = {
-                'giou': float(giou),
-                'ciou': float(ciou),
-                'valid_samples': valid_samples,
-                'total_samples': len(data),
-                'total_intersection': float(total_intersection),
-                'total_union': float(total_union),
-                'results': final_output
-            }
-        
+            "giou": float(giou),
+            "ciou": float(ciou),
+            "valid_samples": valid_samples,
+            "total_samples": len(data),
+            "total_intersection": float(total_intersection),
+            "total_union": float(total_union),
+            "results": final_output,
+        }
+
         # Save results to JSON
         output_json_path = os.path.join(out_dir, "geo_results.json")
         with open(output_json_path, "w") as f:
             json.dump(save_dict, f, indent=2)
 
         print(f"Saved results to {output_json_path}")
+
 
 if __name__ == "__main__":
 
