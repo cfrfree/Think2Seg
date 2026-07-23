@@ -24,16 +24,12 @@ import transformers
 from datasets import Dataset, IterableDataset
 from packaging import version
 from transformers import (
-    AriaForConditionalGeneration,
-    AriaProcessor,
-    AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     AutoProcessor,
     AutoTokenizer,
     GenerationConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
-    Qwen2_5_VLForConditionalGeneration,
     Trainer,
     TrainerCallback,
     is_wandb_available,
@@ -59,6 +55,7 @@ from accelerate.utils import is_peft_model, set_seed
 import PIL.Image
 
 import copy
+import json
 from torch.utils.data import Sampler
 import warnings
 import re
@@ -465,33 +462,8 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             optimizers=optimizers,
         )
 
-        # Check if the per_device_train/eval_batch_size * num processes can be divided by the number of generations
-        num_processes = self.accelerator.num_processes
-        global_batch_size = args.per_device_train_batch_size * num_processes
-        possible_values = [
-            n_gen
-            for n_gen in range(1, global_batch_size + 1)
-            if (global_batch_size) % n_gen == 0
-        ]
-        if self.num_generations not in possible_values:
-            raise ValueError(
-                f"The global train batch size ({num_processes} x {args.per_device_train_batch_size}) must be evenly "
-                f"divisible by the number of generations per prompt ({self.num_generations}). Given the current train "
-                f"batch size, the valid values for the number of generations are: {possible_values}."
-            )
-        if self.args.eval_strategy != "no":
-            global_batch_size = args.per_device_eval_batch_size * num_processes
-            possible_values = [
-                n_gen
-                for n_gen in range(1, global_batch_size + 1)
-                if (global_batch_size) % n_gen == 0
-            ]
-            if self.num_generations not in possible_values:
-                raise ValueError(
-                    f"The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly "
-                    f"divisible by the number of generations per prompt ({self.num_generations}). Given the current "
-                    f"eval batch size, the valid values for the number of generations are: {possible_values}."
-                )
+        # Batched generation in _generate_and_score_completions handles num_generations
+        # No need to check divisibility of batch_size by num_generations
 
         # Ensure each process receives a unique seed to prevent duplicate completions when generating with
         # transformers if num_generations exceeds per_device_train_batch_size. We could skip it if we use vLLM, but
@@ -603,11 +575,36 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         self, inputs: dict[str, Union[torch.Tensor, Any]], model
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        prompts = [x["prompt"] for x in inputs]
-        prompts_text = self.vlm_module.prepare_prompt(self.processing_class, inputs)
-        # Handle both pre-loaded images and image paths
-        images = []
+
+        # Group identical prompts: the sampler may duplicate each prompt num_generations times.
+        # We detect duplicates and generate all copies of the same prompt in ONE batched forward pass.
+        prompt_keys = []
         for x in inputs:
+            key = (x.get("image_path", id(x.get("image", ""))), json.dumps(x["prompt"], sort_keys=True))
+            prompt_keys.append(hash(key))
+        unique_indices = {}
+        input_to_unique = []  # maps each input index → unique group index
+        for i, k in enumerate(prompt_keys):
+            if k not in unique_indices:
+                unique_indices[k] = len(unique_indices)
+            input_to_unique.append(unique_indices[k])
+
+        num_unique = len(unique_indices)
+        num_copies_per_unique = self.num_generations
+
+        # Build compact batch: one representative per unique prompt
+        unique_inputs = []
+        first_occurrence = {}
+        for i, gid in enumerate(input_to_unique):
+            if gid not in first_occurrence:
+                first_occurrence[gid] = i
+                unique_inputs.append((gid, inputs[i]))
+
+        # Prepare compact model inputs (one per unique prompt)
+        unique_prompt_dicts = [{"prompt": x["prompt"]} for _, x in unique_inputs]
+        prompts_text = self.vlm_module.prepare_prompt(self.processing_class, unique_prompt_dicts)
+        images = []
+        for _, x in unique_inputs:
             if "image" in x:
                 imgs = self._get_key_from_inputs(x, "image")
             elif "image_path" in x and x["image_path"] is not None:
@@ -615,25 +612,22 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                     PIL.Image.open(p)
                     for p in self._get_key_from_inputs(x, "image_path")
                 ]
-
+            else:
+                imgs = []
             for img in imgs:
                 try:
-                    # Ensure minimum dimensions of 28 pixels
                     w, h = img.size
                     if w < 28 or h < 28:
-                        # Calculate new dimensions maintaining aspect ratio
                         if w < h:
-                            new_w = 28
-                            new_h = int(h * (28 / w))
+                            new_w, new_h = 28, int(h * (28 / w))
                         else:
-                            new_h = 28
-                            new_w = int(w * (28 / h))
-                    img = img.resize((new_w, new_h), PIL.Image.Resampling.LANCZOS)
+                            new_h, new_w = 28, int(w * (28 / h))
+                        img = img.resize((new_w, new_h), PIL.Image.Resampling.LANCZOS)
                 except:
                     pass
                 images.append(img)
 
-        prompt_inputs = self.vlm_module.prepare_model_inputs(
+        compact_inputs = self.vlm_module.prepare_model_inputs(
             self.processing_class,
             prompts_text,
             images,
@@ -642,40 +636,50 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             padding_side="left",
             add_special_tokens=False,
         )
-        prompt_inputs = super()._prepare_inputs(prompt_inputs)
+        compact_inputs = super()._prepare_inputs(compact_inputs)
+        compact_prompt_ids = compact_inputs["input_ids"]
+        compact_prompt_mask = compact_inputs["attention_mask"]
 
-        prompt_ids, prompt_mask = (
-            prompt_inputs["input_ids"],
-            prompt_inputs["attention_mask"],
-        )
+        # Generate num_generations completions per unique prompt via repeated sampling.
+        # We do NOT expand pixel_values (avoids RoPE index OOB in vision encoder).
+        gen_inputs = {
+            k: v
+            for k, v in compact_inputs.items()
+            if k not in self.vlm_module.get_non_generate_params()
+        }
 
-        # max_prompt_length is not supported yet
-        # if self.max_prompt_length is not None:
-        #     prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-        #     prompt_inputs["input_ids"] = prompt_ids
-        #     prompt_mask = prompt_mask[:, -self.max_prompt_length :]
-        #     prompt_inputs["attention_mask"] = prompt_mask
-
-        # Generate completions
+        all_completion_ids = []
         with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-            generate_returned_result = unwrapped_model.generate(
-                **{
-                    k: v
-                    for k, v in prompt_inputs.items()
-                    if k not in self.vlm_module.get_non_generate_params()
-                },
-                generation_config=self.generation_config,
-            )
-            prompt_length = prompt_ids.size(1)
-            if not self.vlm_module.is_embeds_input():
-                prompt_completion_ids = generate_returned_result
-                prompt_ids = prompt_completion_ids[:, :prompt_length]
-                completion_ids = prompt_completion_ids[:, prompt_length:]
-            else:
-                # In this case, the input of the LLM backbone is the embedding of the combination of the image and text prompt
-                # So the returned result of the `generate` method only contains the completion ids
-                completion_ids = generate_returned_result
-                prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            for _ in range(num_copies_per_unique):
+                gen_result = unwrapped_model.generate(
+                    **gen_inputs,
+                    generation_config=self.generation_config,
+                )
+                prompt_length = compact_prompt_ids.size(1)
+                if not self.vlm_module.is_embeds_input():
+                    c_ids = gen_result[:, prompt_length:]
+                else:
+                    c_ids = gen_result
+                all_completion_ids.append(c_ids)
+
+        # Pad each generation to the same length before concatenating
+        max_len = max(c.shape[1] for c in all_completion_ids)
+        padded = []
+        for c in all_completion_ids:
+            if c.shape[1] < max_len:
+                pad = torch.full((c.shape[0], max_len - c.shape[1]),
+                                 self.processing_class.pad_token_id or self.processing_class.eos_token_id,
+                                 dtype=c.dtype, device=device)
+                c = torch.cat([c, pad], dim=1)
+            padded.append(c)
+        completion_ids = torch.cat(padded, dim=0)
+        # Replicate prompt info to match expanded completions
+        prompt_ids = compact_prompt_ids.repeat_interleave(num_copies_per_unique, dim=0)
+        prompt_mask = compact_prompt_mask.repeat_interleave(num_copies_per_unique, dim=0)
+        prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        prompt_inputs = {k: v.repeat_interleave(num_copies_per_unique, dim=0)
+                         if isinstance(v, torch.Tensor) and v.size(0) == num_unique else v
+                         for k, v in compact_inputs.items()}
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
@@ -1056,7 +1060,8 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
 
     def _get_train_sampler(self, dataset=None) -> Sampler:
-        """Returns a sampler that ensures proper data sampling for GRPO training."""
+        """Returns a sampler for GRPO training.
+        Duplication is handled in _generate_and_score_completions via batched generation."""
         effective_batch_size = (
             self.args.per_device_train_batch_size
             * self.accelerator.num_processes
@@ -1065,17 +1070,17 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         return RepeatRandomSampler(
             data_source=self.train_dataset,
-            mini_repeat_count=self.num_generations,
-            batch_size=effective_batch_size // self.num_generations,
+            mini_repeat_count=1,  # no duplication here; batched generation handles num_generations
+            batch_size=effective_batch_size,
             repeat_count=self.num_iterations,
             seed=self.args.seed,
         )
 
     def _get_eval_sampler(self, eval_dataset) -> Sampler:
-        """Returns a sampler for evaluation."""
+        """Returns a sampler for evaluation. Duplication handled in _generate_and_score_completions."""
         return RepeatRandomSampler(
             data_source=eval_dataset,
-            mini_repeat_count=self.num_generations,
+            mini_repeat_count=1,
             seed=self.args.seed,
         )
 

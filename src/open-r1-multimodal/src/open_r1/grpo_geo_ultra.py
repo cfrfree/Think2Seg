@@ -13,9 +13,7 @@
 # limitations under the License.
 
 import os
-import re
 import pathlib
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 from open_r1.trainer import GRPOConfig
@@ -175,30 +173,6 @@ class GRPOScriptArguments(ScriptArguments):
     )
 
 
-def format_reward(completions, **kwargs):
-    """Reward function that checks if the completion has a specific format."""
-    pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
-    completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [
-        re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents
-    ]
-
-    current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
-    if os.getenv("DEBUG_MODE") == "true":
-        log_path = os.getenv("LOG_PATH")
-        with open(
-            log_path.replace(".txt", "_format_reward.txt"), "a", encoding="utf-8"
-        ) as f:
-            f.write(f"\n{'='*50}\n")
-            f.write(f"------------- {current_time} Format reward -------------\n")
-            for content, match in zip(completion_contents, matches):
-                f.write(f"Content: {content}\n")
-                f.write(f"Has format: {bool(match)}\n")
-                f.write(f"-----------------------------------\n\n")
-
-    return [1.0 if match else 0.0 for match in matches]
-
-
 @dataclass
 class GRPOModelConfig(ModelConfig):
     freeze_vision_modules: bool = False
@@ -217,17 +191,19 @@ def get_vlm_module(model_name_or_path):
 
 def main(script_args, training_args, model_args):
 
-    # import random
-    # random.seed(training_args.seed)
-    # np.random.seed(training_args.seed)
-    # torch.manual_seed(training_args.seed)
-    # if torch.cuda.is_available():
-    #     torch.cuda.manual_seed(training_args.seed)
-    #     torch.cuda.manual_seed_all(training_args.seed)
-
-    # Patch DeepSpeed compatibility with transformers 5.x (use_cache kwarg removed)
-    from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3_5ForConditionalGeneration
-    for _model_cls in (Qwen2_5_VLForConditionalGeneration, Qwen3_5ForConditionalGeneration):
+    # Patch DeepSpeed compatibility with transformers 5.x (use_cache kwarg removed from __init__)
+    _patch_classes = []
+    try:
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        _patch_classes.append(Qwen2_5_VLForConditionalGeneration)
+    except ImportError:
+        pass
+    try:
+        from transformers import Qwen3_5ForConditionalGeneration
+        _patch_classes.append(Qwen3_5ForConditionalGeneration)
+    except ImportError:
+        pass
+    for _model_cls in _patch_classes:
         _orig_init = _model_cls.__init__
         def _make_patched_init(orig_init):
             def _patched_init(self, *args, use_cache=None, **kwargs):
@@ -331,34 +307,28 @@ def main(script_args, training_args, model_args):
             f"No validation split requested. Using entire dataset ({len(dataset)} samples) for training."
         )
 
-    # Handle swanlab reporting
+    # Handle swanlab reporting (graceful fallback if import fails)
     swanlab_callback = None
     report_to = getattr(training_args, "report_to", "none")
     if report_to and "swanlab" in (
         report_to if isinstance(report_to, list) else [report_to]
     ):
         SwanLabCallback, swanlab, _has_swanlab = _init_swanlab()
-        if not _has_swanlab:
-            raise ImportError("swanlab not installed. Run: pip install swanlab")
-        swanlab_api_key = os.environ.get("SWANLAB_API_KEY", "")
-        swanlab.login(swanlab_api_key)
-        swanlab_project = os.environ.get("SWANLAB_PROJECT", "Think2Seg-RS")
-        swanlab_experiment = os.environ.get(
-            "SWANLAB_EXPERIMENT", script_args.run_name or "grpo-geo-ultra"
-        )
-        swanlab.init(project=swanlab_project, experiment_name=swanlab_experiment)
-        swanlab_callback = SwanLabCallback()
-        print(
-            f"SwanLab initialized: project={swanlab_project}, experiment={swanlab_experiment}"
-        )
-        # Disable HuggingFace built-in reporting (swanlab handles it)
-        if isinstance(report_to, list):
-            training_args.report_to = [r for r in report_to if r != "swanlab"] or [
-                "none"
-            ]
+        if _has_swanlab:
+            try:
+                swanlab.login(os.environ.get("SWANLAB_API_KEY", ""))
+                swanlab.init(
+                    project=os.environ.get("SWANLAB_PROJECT", "Think2Seg-RS"),
+                    experiment_name=os.environ.get("SWANLAB_EXPERIMENT", script_args.run_name or "grpo-geo-ultra"),
+                )
+                swanlab_callback = SwanLabCallback()
+                print(f"SwanLab initialized successfully")
+            except Exception as e:
+                print(f"SwanLab init failed: {e}, continuing without logging")
+                training_args.report_to = "none"
         else:
+            print("swanlab not available, continuing without logging")
             training_args.report_to = "none"
-
     # Select trainer class based on vlm_trainer argument
     trainer_cls = Geo_VLMGRPOTrainer_ultra
     print("using trainer:", trainer_cls.__name__)
